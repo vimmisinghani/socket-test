@@ -1,23 +1,25 @@
 // Setup basic express server
 var express = require('express');
+const dotenv = require('dotenv');
+dotenv.config();
 var app = express();
 var fs = require('fs');
 var server = require('http').createServer(app);
 var io = require('socket.io')(server);
 var port = process.env.PORT || 3000;
+var connectToDatabase = require('./db.js');
+const userModel = require('./models/user.js');
+const { aggregateWithGroupBy, findOne, updateAll, create, upsert} = require('./services/database.js');
 
 server.listen(port, function () {
   console.log('Server listening at port %d', port);
+  connectToDatabase();
 });
 
 app.use(express.static(__dirname));
-var groupCollection =  new function() {
-  this.totalGroupCount = 0,
-  this.groupList = []
-};
-
 var numUsers = 0;
 var allUsers = [];
+var rooms = [];
 
 io.on('connection', function (socket) {
 
@@ -34,88 +36,78 @@ io.on('connection', function (socket) {
     socket.broadcast.emit('username updated', {allUsers: allUsers});
   });
 
-
-  socket.on('private message', function (data) {
-
-    let toUserSocketId;
-    let fromUserName;
-    allUsers.forEach((user) => {
-          
-      if(user.id === data.toUserid) {
-        toUserSocketId = user.socketId
-      }
-      if(user.id === data.fromUserId) {
-        fromUserName = user.user;
-      }
-    });
-    data['fromUserName'] = fromUserName;
-    io.to(toUserSocketId).emit('private message', data);
-  });
-
-  
-  socket.on('add user', function (data) {
+  socket.on('add user',  async(data) => {
+    console.log('===add user =====');
     let username = data.username;
     
-    let socketId = socket.id;//
-    let userId =  (data.userLoggedIn !== undefined && data.userLoggedIn !== '')? data.userLoggedIn: socket.id;
-    if (addedUser) return;
+    let socketId = socket.id;
+    console.log('===socket id====', socketId);
+
+    let userId;
+    if (data.userLoggedIn !== undefined && data.userLoggedIn !== '') {
+      userId = data.userLoggedIn;
+    } else {
+      userId = socket.id;
+    }
+
+    let roomFound = rooms.filter((r) => {
+      return (r === ('usr_' + userId));
+    });
+    console.log('===roomfound=====', roomFound);
+
+    if (roomFound.length === 0) {
+      rooms.push('usr_' + userId);
+    }
+
+    // let userId =  (data.userLoggedIn !== undefined && data.userLoggedIn !== '')? data.userLoggedIn: socket.id;
+    
 
     socket.username = username;
     ++numUsers;
     
-    addedUser = true;
+    let filterParams = {userId: userId};
+    let userdetails = await findOne(filterParams, userModel);
+    let socketIdArr =  (userdetails !== null) ? userdetails.socketId: [];
+    socketIdArr.push(socketId);
 
     let newUser = {
-      numUsers: numUsers,
       user: username,
       id: userId,
-      socketId: socketId
+      socketId: socketIdArr
     };
 
-    if (data.userLoggedIn !== undefined && data.userLoggedIn !== '') {
-      allUsers.filter((user) => {
-        if(user.id === newUser.id) {
-          user.socketId = socketId
-        }
-      });
-    } 
+    await upsert(filterParams, newUser, userModel);
    
-      allUsers.push(newUser);
-    
+    for(let room of rooms) {
+      socket.join('usr_'+room);
+      
+      //  if (room !== userId) {
+        // console.log('===room===', room);
+        // console.log('===userId=====', userId);
+        io.to('usr_'+room).emit('user joined', {
+          username: socket.username,
+          id: userId,
+          socketId: socketId
+        });  
+      // }
+    }
+    setInterval(() => {
+      console.log('=== in timeout === ===rooms=====', rooms);
+
+      for(let room of rooms) {
+        socket.join('usr_'+room);
+        io.to('usr_'+room).emit('testpayload',  socket.username + ' saying hii!!');  
+      }
+    }, 10000, 3);
+
     socket.emit('login', {
       numUsers: numUsers,
       user: username,
       id: userId,
       socketId: socketId, // socket.id,
-      allUsers: allUsers,
-      stime: Date.now(),
-      read: false
-    });
-   
-    socket.broadcast.emit('user joined', {
-      username: socket.username,
-      id: userId,
-      socketId: socketId,
-      numUsers: numUsers,
-      allUsers: allUsers
     });
   });
 
-  socket.on('typing', function () {
-    socket.broadcast.emit('typing', {
-      username: socket.username,
-      id: socket.id
-    });
-  });
-
-  socket.on('stop typing', function () {
-    socket.broadcast.emit('stop typing', {
-      username: socket.username,
-      id: socket.id
-    });
-  });
-
-  
   socket.on('disconnect', function () {
 
     if (addedUser) {
@@ -136,100 +128,7 @@ io.on('connection', function (socket) {
       });
     }
   });
-
   
-  socket.on('create group', function (data) {
-
-
-    let grpUsers = data.grpUsers.split(",")
-    let groupId = (Math.random()+1).toString(36).slice(2, 18);
-   groupCollection.groupList.push({
-     groupId: groupId,
-     grpUsers: grpUsers,
-     grpName: data.grpName,
-     admin: data.admin,
-     adminName: data.adminName,
-     chat: []
-   });
-   
-    groupCollection.totalGroupCount ++;
-
-    grpUsers.forEach((user) => {
-      // find out socketId of user
-      let userSocketId;
-      allUsers.forEach((u) => {
-        if(u.id === user) {
-          userSocketId = u.socketId;
-        }
-      });
-      // =========================
-
-
-      if(userSocketId !== undefined) {
-         io.to(userSocketId).emit('group created', {
-           groupId: groupId,
-           grpUsers: grpUsers,
-           grpName: data.grpName,
-           admin: data.admin,
-           adminName: data.adminName,
-           adminSocketId: data.adminSocketId, 
-           chat: [],
-           //  admin: socket.username,
-         });
-      }
-    });
-    
-
- });
-
- socket.on('group message send', function(data){
-   let fromUserId = data.fromUserId;
-   let message = data.message;
-   
-   let groupId = data.groupId;
-   
-   let groupDetails = groupCollection.groupList.filter((grp) => {
-     if(grp.groupId === groupId)
-      return grp;
-   });
-  
-   if(groupDetails !== undefined && groupDetails.length > 0){
-     let groupUsers = groupDetails[0].grpUsers;
-     groupUsers.forEach((user) => {
-
-       let toUserSocketId;
-       let fromUserName;
-       
-       allUsers.forEach((u) => {
-          
-          if(u.id === user) {
-            toUserSocketId = u.socketId
-          }
-          if(u.id === fromUserId) {
-            fromUserName = u.user;
-          }
-       });
-
-       let obj = {
-        fromUserName: fromUserName,
-        fromUserId: fromUserId,
-        groupId: groupDetails[0].groupId,
-        grpUsers: groupUsers,
-        grpName: groupDetails[0].grpName,
-        message: message
-      };
-
-      
-       if(user !== "" && user !== fromUserId) {
-        
-          if(toUserSocketId !== undefined && toUserSocketId !== null) {
-            io.to(toUserSocketId).emit('group message received', obj );
-          }
-
-       }
-     });
-   }
- });
 });
 
 

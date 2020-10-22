@@ -563,8 +563,15 @@ $(function() {
     }
   });
 
+  socket.on('testpayload', function(data) {
+    alert('got payload' + data);
+    console.log('===got payload=====', data);
+  });
+
   // Whenever the server emits 'user joined', log it in the chat body
   socket.on('user joined', function (data) {
+    console.log('a new user joined', data);
+    alert('hello new user joined' + data.username);
     usersList = data.allUsers
     console.log("===data.allUsers=== ", data.allUsers);
     localStorage.setItem('allUsers', JSON.stringify(data.allUsers));
